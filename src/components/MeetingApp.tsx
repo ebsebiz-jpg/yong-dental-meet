@@ -1,8 +1,10 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
+import { deleteMonth, saveMonth, saveReport, saveRules, type Loaded } from "@/app/data";
 import { savePptx, type SlideItem } from "@/lib/pptx";
+import { deserializeMonth, emptyReport, normalizeReport, serializeMonth, type Report } from "@/lib/store";
 import {
   DEFAULT_RULES,
   GROWTH,
@@ -19,7 +21,6 @@ import {
   type Table,
 } from "@/lib/dentweb";
 
-const RULES_KEY = "dm_rules";
 const fmt = (c: Cell) =>
   c === null || c === "" ? "–" : typeof c === "number" ? c.toLocaleString("ko-KR") : c;
 
@@ -113,24 +114,85 @@ const MANUAL = [
   ["next", "차월 목표 및 액션아이템"],
 ] as const;
 
-export default function MeetingApp({ logout }: { logout: () => Promise<void> }) {
-  const [months, setMonths] = useState<Map<string, Month>>(new Map());
+type SaveState = "idle" | "saving" | "saved" | "error";
+const nowLabel = () => new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
+
+export default function MeetingApp({ logout, initial }: { logout: () => Promise<void>; initial: Loaded }) {
+  const [months, setMonths] = useState<Map<string, Month>>(
+    () => new Map(Object.entries(initial.months).map(([k, v]) => [k, deserializeMonth(v)])),
+  );
+  const [reports, setReports] = useState<Record<string, Report>>(() =>
+    Object.fromEntries(Object.entries(initial.reports).map(([k, v]) => [k, normalizeReport(v)])),
+  );
   const [unknown, setUnknown] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [curYm, setCurYm] = useState("");
   const [prevSel, setPrevSel] = useState<string | null>(null);
-  const [rulesText, setRulesText] = useState(DEFAULT_RULES);
-  const [meta, setMeta] = useState({ title: "", date: "", place: "", attendees: "" });
-  const [comments, setComments] = useState<Record<string, string>>({});
-  const [growthIn, setGrowthIn] = useState(GROWTH.map((g) => g.def));
+  const [rulesText, setRulesText] = useState(initial.rules ?? DEFAULT_RULES);
   const [pptBusy, setPptBusy] = useState(false);
+  const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [savedAt, setSavedAt] = useState("");
+  const dirtyReports = useRef(new Set<string>());
+  const rulesDirty = useRef(false);
+  const reportsRef = useRef(reports);
+  const rulesRef = useRef(rulesText);
 
   const rules = useMemo(() => parseRules(rulesText), [rulesText]);
   const keys = useMemo(() => [...months.keys()].sort(), [months]);
   const cur = keys.includes(curYm) ? curYm : (keys[keys.length - 1] ?? "");
   const defPrev = keys.includes(prevYm(cur)) ? prevYm(cur) : (keys.filter((k) => k < cur).pop() ?? null);
   const prev = prevSel !== null && (prevSel === "" || keys.includes(prevSel)) ? (prevSel || null) : defPrev;
+
+  // 회의 개요·코멘트·시뮬레이션 입력은 기준월별로 따로 보관한다.
+  const blank = useMemo(() => emptyReport(), []);
+  const report = reports[cur] ?? blank;
+  const meta = report.meta;
+  const comments = report.comments;
+  const growthIn = report.growthIn;
+  const patch = (fn: (r: Report) => Report) => {
+    if (!cur) return;
+    dirtyReports.current.add(cur);
+    setReports((p) => ({ ...p, [cur]: fn(p[cur] ?? emptyReport()) }));
+  };
+  const setMeta = (v: Report["meta"] | ((m: Report["meta"]) => Report["meta"])) =>
+    patch((r) => ({ ...r, meta: typeof v === "function" ? v(r.meta) : v }));
+  const setComments = (v: Record<string, string> | ((c: Record<string, string>) => Record<string, string>)) =>
+    patch((r) => ({ ...r, comments: typeof v === "function" ? v(r.comments) : v }));
+  const setGrowthIn = (v: number[]) => patch((r) => ({ ...r, growthIn: v }));
+
+  useEffect(() => {
+    reportsRef.current = reports;
+  }, [reports]);
+  useEffect(() => {
+    rulesRef.current = rulesText;
+  }, [rulesText]);
+
+  // 입력을 멈추고 1초 뒤에 자동 저장한다.
+  useEffect(() => {
+    if (!initial.dbReady) return;
+    if (!dirtyReports.current.size && !rulesDirty.current) return;
+    const t = setTimeout(async () => {
+      const yms = [...dirtyReports.current];
+      const withRules = rulesDirty.current;
+      dirtyReports.current.clear();
+      rulesDirty.current = false;
+      setSaveState("saving");
+      const results = await Promise.all([
+        ...yms.map((ym) => saveReport(ym, reportsRef.current[ym])),
+        ...(withRules ? [saveRules(rulesRef.current)] : []),
+      ]);
+      const ok = results.every((r) => r.ok);
+      if (!ok) {
+        yms.forEach((ym) => dirtyReports.current.add(ym));
+        rulesDirty.current = withRules;
+      } else {
+        setSavedAt(nowLabel());
+      }
+      setSaveState(ok ? "saved" : "error");
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [reports, rulesText, initial.dbReady]);
 
   const tables = useMemo(() => (cur ? buildTables(months, cur, prev, rules) : []), [months, cur, prev, rules]);
   const mc = useMemo(() => metrics(months.get(cur)), [months, cur]);
@@ -148,10 +210,15 @@ export default function MeetingApp({ logout }: { logout: () => Promise<void> }) 
       const res = ingest(files, months);
       setMonths(res.months);
       setUnknown(res.unknown);
-      try {
-        const saved = localStorage.getItem(RULES_KEY);
-        if (saved) setRulesText(saved);
-      } catch {}
+      if (initial.dbReady) {
+        // 새로 올린 달은 저장하고, 이미 있던 달은 같은 리포트를 덮어써 최신 자료로 갱신한다.
+        setSaveState("saving");
+        const touched = [...res.months].filter(([k, m]) => months.get(k) !== m);
+        const results = await Promise.all(touched.map(([k, m]) => saveMonth(k, serializeMonth(m))));
+        const ok = results.every((r) => r.ok);
+        if (ok) setSavedAt(nowLabel());
+        setSaveState(ok ? "saved" : "error");
+      }
     } catch {
       setErr("파일을 읽지 못했습니다. 덴트웹에서 내보낸 원본 파일인지 확인해 주세요.");
     } finally {
@@ -173,6 +240,20 @@ export default function MeetingApp({ logout }: { logout: () => Promise<void> }) 
       for (const [k, v] of Object.entries(EXAMPLE_COMMENTS)) if (!next[k]) next[k] = v;
       return next;
     });
+  };
+
+  const removeMonth = async (ym: string) => {
+    if (!window.confirm(`${ymLabel(ym)}의 저장된 자료와 입력 내용을 삭제할까요? 되돌릴 수 없습니다.`)) return;
+    if (initial.dbReady) {
+      const r = await deleteMonth(ym);
+      if (!r.ok) {
+        setErr(r.error ?? "삭제에 실패했습니다.");
+        return;
+      }
+    }
+    setMonths((p) => new Map([...p].filter(([k]) => k !== ym)));
+    setReports((p) => Object.fromEntries(Object.entries(p).filter(([k]) => k !== ym)));
+    dirtyReports.current.delete(ym);
   };
 
   const exportPptx = async () => {
@@ -256,16 +337,22 @@ export default function MeetingApp({ logout }: { logout: () => Promise<void> }) 
       </header>
 
       <div className="rounded-lg bg-amber-50 p-3 text-xs text-amber-900 print:hidden">
-        올린 파일은 이 브라우저 안에서만 읽고 계산하며 서버로 전송하거나 저장하지 않습니다. 환자 이름·연락처가 든 시트는
-        집계에 필요한 값(신환 주소의 구 단위, 소개자·소개받은 신환의 성명)만 쓰고 나머지는 읽지 않습니다. 인쇄·공유 전에 식별정보가
-        없는지 확인해 주세요.
+        엑셀 파일 자체는 서버로 보내지 않고 이 브라우저에서 읽어 집계합니다. 집계 결과(소개자·소개받은 신환의 성명, 신환
+        주소의 구 단위 포함)와 입력한 내용은 서버 데이터베이스에 저장되어 어느 PC에서든 이어서 볼 수 있습니다. 연락처와
+        생년월일 등은 읽지 않습니다. 인쇄·공유 전에 식별정보가 없는지 확인해 주세요.
+        {!initial.dbReady && (
+          <span className="mt-1 block font-medium text-red-700">
+            저장소(DATABASE_URL)가 연결되지 않아 지금은 저장되지 않습니다. 새로고침하면 입력한 내용이 사라집니다.
+          </span>
+        )}
       </div>
 
       <div className={`${box} print:hidden`}>
         <h2 className="font-semibold text-slate-900">1. 덴트웹 자료 올리기</h2>
         <p className="mt-1 text-xs text-slate-500">
           월별 리포트 5종(기간별 진료비, 내원경로 분포, 상담자별 상담, 수입 통계, 기공 의뢰)을 zip 그대로 또는 엑셀 파일로
-          올립니다. 여러 달을 한꺼번에 올려도 됩니다.
+          올립니다. 여러 달을 한꺼번에 올려도 됩니다. 이미 올린 달의 같은 리포트를 다시 올리면 최신 자료로 바뀌고, 한 번 올린
+          달은 다시 올리지 않아도 저장되어 있습니다.
         </p>
         <input
           type="file"
@@ -294,6 +381,7 @@ export default function MeetingApp({ logout }: { logout: () => Promise<void> }) 
                       {k.label}
                     </th>
                   ))}
+                  <th className="border border-slate-200 px-2 py-1.5 text-center font-medium">삭제</th>
                 </tr>
               </thead>
               <tbody>
@@ -305,6 +393,11 @@ export default function MeetingApp({ logout }: { logout: () => Promise<void> }) 
                         {months.get(k)?.[x.kind] ? <span className="text-emerald-700">✓</span> : <span className="text-slate-300">–</span>}
                       </td>
                     ))}
+                    <td className="border border-slate-200 px-2 py-1.5 text-center">
+                      <button onClick={() => removeMonth(k)} className="text-xs text-red-600 underline">
+                        삭제
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -347,10 +440,8 @@ export default function MeetingApp({ logout }: { logout: () => Promise<void> }) 
               value={rulesText}
               className={`${input} mt-2 font-mono`}
               onChange={(e) => {
+                rulesDirty.current = true;
                 setRulesText(e.target.value);
-                try {
-                  localStorage.setItem(RULES_KEY, e.target.value);
-                } catch {}
               }}
             />
           </details>
@@ -360,7 +451,23 @@ export default function MeetingApp({ logout }: { logout: () => Promise<void> }) 
       {cur && (
         <div className={`${box} space-y-8`}>
           <div className="flex flex-wrap items-center justify-between gap-2 print:hidden">
-            <h2 className="font-semibold text-slate-900">3. 회의 자료</h2>
+            <h2 className="font-semibold text-slate-900">
+              3. 회의 자료{" "}
+              <span
+                className={`ml-2 text-xs font-normal ${saveState === "error" ? "text-red-600" : "text-slate-500"}`}
+                aria-live="polite"
+              >
+                {!initial.dbReady
+                  ? "저장소 미연결(저장 안 됨)"
+                  : saveState === "saving"
+                    ? "저장 중…"
+                    : saveState === "error"
+                      ? "저장 실패 — 입력을 이어가면 다시 시도합니다"
+                      : saveState === "saved"
+                        ? `자동 저장됨 ${savedAt}`
+                        : "입력하면 자동 저장됩니다"}
+              </span>
+            </h2>
             <div className="flex gap-2">
               <button
                 onClick={fillExample}
