@@ -113,8 +113,6 @@ const MANUAL = [
   ["next", "차월 목표 및 액션아이템"],
 ] as const;
 
-const COSTS = ["재료비", "기공료", "인건비", "임대료·관리비", "마케팅비", "기타 운영비"];
-
 export default function MeetingApp({ logout }: { logout: () => Promise<void> }) {
   const [months, setMonths] = useState<Map<string, Month>>(new Map());
   const [unknown, setUnknown] = useState<string[]>([]);
@@ -125,8 +123,6 @@ export default function MeetingApp({ logout }: { logout: () => Promise<void> }) 
   const [rulesText, setRulesText] = useState(DEFAULT_RULES);
   const [meta, setMeta] = useState({ title: "", date: "", place: "", attendees: "" });
   const [comments, setComments] = useState<Record<string, string>>({});
-  const [costCur, setCostCur] = useState<Record<string, string>>({});
-  const [costPrev, setCostPrev] = useState<Record<string, string>>({});
   const [growthIn, setGrowthIn] = useState(GROWTH.map((g) => g.def));
   const [pptBusy, setPptBusy] = useState(false);
 
@@ -138,7 +134,6 @@ export default function MeetingApp({ logout }: { logout: () => Promise<void> }) 
 
   const tables = useMemo(() => (cur ? buildTables(months, cur, prev, rules) : []), [months, cur, prev, rules]);
   const mc = useMemo(() => metrics(months.get(cur)), [months, cur]);
-  const mp = useMemo(() => metrics(prev ? months.get(prev) : undefined), [months, prev]);
 
   const onFiles = async (list: FileList | null) => {
     if (!list || !list.length) return;
@@ -164,10 +159,6 @@ export default function MeetingApp({ logout }: { logout: () => Promise<void> }) 
     }
   };
 
-  const sumCost = (c: Record<string, string>) =>
-    COSTS.reduce((s, k) => s + (parseFloat((c[k] ?? "").replace(/,/g, "")) || 0), 0);
-  const costC = sumCost(costCur);
-  const costP = sumCost(costPrev);
 
   // 이미 입력한 칸은 건드리지 않고 빈 칸만 예시로 채운다.
   const fillExample = () => {
@@ -195,32 +186,14 @@ export default function MeetingApp({ logout }: { logout: () => Promise<void> }) 
         fr.onerror = () => reject(fr.error);
         fr.readAsDataURL(blob);
       });
-      const amount = (v: string | undefined): number | null => {
-        const n = parseFloat((v ?? "").replace(/,/g, ""));
-        return Number.isNaN(n) ? null : n;
-      };
       const items: SlideItem[] = [];
       if (comments.actions?.trim()) items.push({ kind: "text", title: "전월 액션아이템 점검", body: comments.actions });
       for (const t of tables) items.push({ kind: "table", table: t, comment: comments[t.id] });
       items.push({
         kind: "table",
         table: {
-          id: "cost",
-          title: "4. 비용 및 영업이익 (원)",
-          note: "총 진료비는 공단 청구액을 포함한 발생 기준이라 실제 입금액과 다르고, 공단 삭감·환수는 반영되지 않습니다.",
-          headers: ["항목", "당월", "전월"],
-          rows: [
-            ...COSTS.map((k) => [k, amount(costCur[k]), amount(costPrev[k])]),
-            ["비용 합계", costC, costP],
-            ["영업이익 (총 진료비 − 비용)", mc.total !== null ? Math.round(mc.total - costC) : null, mp.total !== null ? Math.round(mp.total - costP) : null],
-          ],
-        },
-      });
-      items.push({
-        kind: "table",
-        table: {
           id: "growth",
-          title: "5. 진료비 성장 시뮬레이션",
+          title: "4. 진료비 성장 시뮬레이션",
           note: "당월 실적을 기준으로, 항목이 개선되면 월 총 진료비가 얼마나 늘 수 있는지 단순 추정한 값입니다.",
           headers: ["개선 항목", "개선폭", "월 진료비 증가 추정(원)"],
           rows: GROWTH.map((g, i) => [g.label, `${growthIn[i]}${g.unit}`, g.estimate(mc, growthIn[i])]),
@@ -445,42 +418,7 @@ export default function MeetingApp({ logout }: { logout: () => Promise<void> }) 
           ))}
 
           <section className="break-inside-avoid space-y-2">
-            <h3 className="text-base font-semibold">4. 비용 및 영업이익 (직접 입력, 원)</h3>
-            <table className="w-full border-collapse text-sm">
-              <thead>
-                <tr className="bg-slate-100">
-                  {["항목", "당월", "전월"].map((h) => (
-                    <th key={h} className="border border-slate-200 px-2 py-1.5 text-left font-medium">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {COSTS.map((k) => (
-                  <tr key={k}>
-                    <td className="border border-slate-200 px-2 py-1">{k}</td>
-                    <td className="border border-slate-200 px-1 py-1"><input inputMode="numeric" className={input} value={costCur[k] ?? ""} onChange={(e) => setCostCur({ ...costCur, [k]: e.target.value })} /></td>
-                    <td className="border border-slate-200 px-1 py-1"><input inputMode="numeric" className={input} value={costPrev[k] ?? ""} onChange={(e) => setCostPrev({ ...costPrev, [k]: e.target.value })} /></td>
-                  </tr>
-                ))}
-                <tr className="font-medium">
-                  <td className="border border-slate-200 px-2 py-1.5">비용 합계</td>
-                  <td className="border border-slate-200 px-2 py-1.5 text-right tabular-nums">{costC.toLocaleString("ko-KR")}</td>
-                  <td className="border border-slate-200 px-2 py-1.5 text-right tabular-nums">{costP.toLocaleString("ko-KR")}</td>
-                </tr>
-                <tr className="font-medium">
-                  <td className="border border-slate-200 px-2 py-1.5">영업이익 (총 진료비 − 비용)</td>
-                  <td className="border border-slate-200 px-2 py-1.5 text-right tabular-nums">{mc.total !== null ? Math.round(mc.total - costC).toLocaleString("ko-KR") : "–"}</td>
-                  <td className="border border-slate-200 px-2 py-1.5 text-right tabular-nums">{mp.total !== null ? Math.round(mp.total - costP).toLocaleString("ko-KR") : "–"}</td>
-                </tr>
-              </tbody>
-            </table>
-            <p className="text-xs text-slate-500">
-              총 진료비는 공단 청구액을 포함한 발생 기준이라 실제 입금액과 다르고, 공단 삭감·환수는 반영되지 않습니다.
-            </p>
-          </section>
-
-          <section className="break-inside-avoid space-y-2">
-            <h3 className="text-base font-semibold">5. 진료비 성장 시뮬레이션</h3>
+            <h3 className="text-base font-semibold">4. 진료비 성장 시뮬레이션</h3>
             <p className="text-xs text-slate-500">
               당월 실적을 기준으로, 아래 항목이 개선되면 월 총 진료비가 얼마나 늘 수 있는지 단순 추정합니다. 숫자를 바꿔 보세요.
             </p>
