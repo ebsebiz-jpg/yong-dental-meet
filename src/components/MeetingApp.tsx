@@ -216,7 +216,7 @@ export default function MeetingApp({ logout }: { logout: () => Promise<void> }) 
 
       <div className="rounded-lg bg-amber-50 p-3 text-xs text-amber-900 print:hidden">
         올린 파일은 이 브라우저 안에서만 읽고 계산하며 서버로 전송하거나 저장하지 않습니다. 환자 이름·연락처가 든 시트는
-        집계에 필요한 값(신환 주소의 구 단위, 소개자 성명)만 쓰고 나머지는 읽지 않습니다. 인쇄·공유 전에 식별정보가
+        집계에 필요한 값(신환 주소의 구 단위, 소개자·소개받은 신환의 성명)만 쓰고 나머지는 읽지 않습니다. 인쇄·공유 전에 식별정보가
         없는지 확인해 주세요.
       </div>
 

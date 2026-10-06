@@ -3,7 +3,7 @@ import JSZip from "jszip";
 
 /*
  * 덴트웹에서 내보낸 월간 리포트 5종을 읽어 집계한다.
- * 환자 이름·연락처가 들어 있는 시트는 집계에 필요한 값(구 단위 주소, 소개자 성명)만 꺼내고
+ * 환자 이름·연락처가 들어 있는 시트는 집계에 필요한 값(구 단위 주소, 소개자·소개받은 신환 성명)만 꺼내고
  * 나머지는 메모리에 남기지 않는다.
  */
 
@@ -35,7 +35,7 @@ export type RouteData = {
   rows: RouteRow[];
   totals: { patients: number; ret: number; fresh: number; visits: number; total: number };
   regions: Map<string, number>; // 신환 거주 구
-  referrers: Map<string, { name: string; count: number }>; // 소개한 환자 차트번호 -> 성명, 소개 인원
+  referrers: Map<string, { name: string; count: number; referred: string[] }>; // 소개한 환자 차트번호 -> 성명, 소개 인원, 소개받은 신환 성명
 };
 export type ConsultRow = {
   name: string;
@@ -181,15 +181,16 @@ function parseRoute(wb: XLSX.WorkBook): RouteData {
     );
   }
 
-  // 신환 시트: 주소(구 단위)와 소개자(메모에 적힌 성명·차트번호)만 집계하고, 신환 본인의 이름·연락처는 읽지 않는다.
+  // 신환 시트: 주소(구 단위)와 소개자(메모에 적힌 성명·차트번호), 소개받은 신환의 성명만 읽고 연락처 등은 읽지 않는다.
   const regions = new Map<string, number>();
-  const referrers = new Map<string, { name: string; count: number }>();
+  const referrers = new Map<string, { name: string; count: number; referred: string[] }>();
   for (const name of wb.SheetNames.slice(1)) {
     if (!name.startsWith("신환")) continue;
     const sg = grid(wb.Sheets[name]);
     const sh = sg[0] ?? [];
     const addr = colIndex(sh, "주소");
     const memo = colIndex(sh, "메모");
+    const nameCol = colIndex(sh, "이름");
     for (const r of sg.slice(1)) {
       if (!text(r[0])) continue;
       const k = addr >= 0 ? regionOf(text(r[addr])) : "기타·미기재";
@@ -199,7 +200,12 @@ function parseRoute(wb: XLSX.WorkBook): RouteData {
         const m = text(r[memo]).match(/([가-힣A-Za-z]+)\s*\((\d{3,9})\)/);
         if (m) {
           const prev = referrers.get(m[2]);
-          referrers.set(m[2], { name: prev?.name ?? m[1], count: (prev?.count ?? 0) + 1 });
+          const who = nameCol >= 0 ? text(r[nameCol]) : "";
+          referrers.set(m[2], {
+            name: prev?.name ?? m[1],
+            count: (prev?.count ?? 0) + 1,
+            referred: who ? [...(prev?.referred ?? []), who] : (prev?.referred ?? []),
+          });
         }
       }
     }
@@ -599,9 +605,12 @@ export function buildTables(
         out.push({
           id: "t35b",
           title: "3-5. 소개를 많이 해 준 환자 (당월 신환 기준)",
-          note: "신환 메모에 적힌 소개자 성명을 집계했습니다. 감사 인사·혜택 안내 대상 확인용이며, 성명이 들어 있으므로 인쇄·공유 전에 확인해 주세요.",
-          headers: ["소개자 성명", "소개 신환(명)"],
-          rows: [...R.referrers.values()].sort((x, y) => y.count - x.count).slice(0, 10).map((v) => [v.name, v.count]),
+          note: "신환 메모에 적힌 소개자 성명과 소개받은 신환의 성명을 집계했습니다. 감사 인사·혜택 안내 대상 확인용이며, 성명이 들어 있으므로 인쇄·공유 전에 확인해 주세요.",
+          headers: ["소개자 성명", "소개 신환(명)", "소개받은 신환"],
+          rows: [...R.referrers.values()]
+            .sort((x, y) => y.count - x.count)
+            .slice(0, 10)
+            .map((v) => [v.name, v.count, v.referred.join(", ")]),
         });
       }
     }
