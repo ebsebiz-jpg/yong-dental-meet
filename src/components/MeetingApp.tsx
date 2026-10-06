@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import * as XLSX from "xlsx";
+import { savePptx, type SlideItem } from "@/lib/pptx";
 import {
   DEFAULT_RULES,
   GROWTH,
@@ -127,6 +128,7 @@ export default function MeetingApp({ logout }: { logout: () => Promise<void> }) 
   const [costCur, setCostCur] = useState<Record<string, string>>({});
   const [costPrev, setCostPrev] = useState<Record<string, string>>({});
   const [growthIn, setGrowthIn] = useState(GROWTH.map((g) => g.def));
+  const [pptBusy, setPptBusy] = useState(false);
 
   const rules = useMemo(() => parseRules(rulesText), [rulesText]);
   const keys = useMemo(() => [...months.keys()].sort(), [months]);
@@ -180,6 +182,72 @@ export default function MeetingApp({ logout }: { logout: () => Promise<void> }) 
       for (const [k, v] of Object.entries(EXAMPLE_COMMENTS)) if (!next[k]) next[k] = v;
       return next;
     });
+  };
+
+  const exportPptx = async () => {
+    setPptBusy(true);
+    setErr("");
+    try {
+      const blob = await (await fetch("/logo.png")).blob();
+      const logo = await new Promise<string>((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(String(fr.result));
+        fr.onerror = () => reject(fr.error);
+        fr.readAsDataURL(blob);
+      });
+      const amount = (v: string | undefined): number | null => {
+        const n = parseFloat((v ?? "").replace(/,/g, ""));
+        return Number.isNaN(n) ? null : n;
+      };
+      const items: SlideItem[] = [];
+      if (comments.actions?.trim()) items.push({ kind: "text", title: "전월 액션아이템 점검", body: comments.actions });
+      for (const t of tables) items.push({ kind: "table", table: t, comment: comments[t.id] });
+      items.push({
+        kind: "table",
+        table: {
+          id: "cost",
+          title: "4. 비용 및 영업이익 (원)",
+          note: "총 진료비는 공단 청구액을 포함한 발생 기준이라 실제 입금액과 다르고, 공단 삭감·환수는 반영되지 않습니다.",
+          headers: ["항목", "당월", "전월"],
+          rows: [
+            ...COSTS.map((k) => [k, amount(costCur[k]), amount(costPrev[k])]),
+            ["비용 합계", costC, costP],
+            ["영업이익 (총 진료비 − 비용)", mc.total !== null ? Math.round(mc.total - costC) : null, mp.total !== null ? Math.round(mp.total - costP) : null],
+          ],
+        },
+      });
+      items.push({
+        kind: "table",
+        table: {
+          id: "growth",
+          title: "5. 진료비 성장 시뮬레이션",
+          note: "당월 실적을 기준으로, 항목이 개선되면 월 총 진료비가 얼마나 늘 수 있는지 단순 추정한 값입니다.",
+          headers: ["개선 항목", "개선폭", "월 진료비 증가 추정(원)"],
+          rows: GROWTH.map((g, i) => [g.label, `${growthIn[i]}${g.unit}`, g.estimate(mc, growthIn[i])]),
+        },
+        comment: comments.focus?.trim() ? comments.focus : undefined,
+        commentLabel: "이번 달 집중 과제",
+      });
+      for (const [k, label] of MANUAL.slice(1)) {
+        if (comments[k]?.trim()) items.push({ kind: "text", title: label, body: comments[k] });
+      }
+      await savePptx({
+        logo,
+        title: meta.title || `${ymLabel(cur)} 월간 경영회의`,
+        lines: [
+          meta.date && `일시  ${meta.date}`,
+          meta.place && `장소  ${meta.place}`,
+          meta.attendees && `참석자  ${meta.attendees}`,
+          `기준 ${ymLabel(cur)}${prev ? ` · 비교 ${ymLabel(prev)}` : ""}`,
+        ].filter((x): x is string => !!x),
+        items,
+        fileName: `월간경영회의_${cur}.pptx`,
+      });
+    } catch {
+      setErr("PPT를 만들지 못했습니다. 잠시 뒤 다시 시도해 주세요.");
+    } finally {
+      setPptBusy(false);
+    }
   };
 
   const exportXlsx = () => {
@@ -330,6 +398,13 @@ export default function MeetingApp({ logout }: { logout: () => Promise<void> }) 
               </button>
               <button onClick={exportXlsx} className="rounded-md border border-slate-300 px-3 py-1.5 text-sm">
                 엑셀로 저장
+              </button>
+              <button
+                onClick={exportPptx}
+                disabled={pptBusy}
+                className="rounded-md border border-slate-300 px-3 py-1.5 text-sm disabled:opacity-50"
+              >
+                {pptBusy ? "PPT 만드는 중…" : "PPT로 저장"}
               </button>
               <button onClick={() => window.print()} className="rounded-md bg-slate-900 px-3 py-1.5 text-sm text-white">
                 인쇄 / PDF
