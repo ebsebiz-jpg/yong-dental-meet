@@ -7,8 +7,15 @@ let ready: Promise<void> | null = null;
 
 export const hasDb = (): boolean => !!process.env.DATABASE_URL;
 
+/** 붙여넣다가 생기기 쉬운 앞뒤 공백·따옴표와 끝의 쿼리(?pgbouncer=true 등)를 걷어낸다. */
+function cleanUrl(raw: string): string {
+  const u = raw.trim().replace(/^["']+|["']+$/g, "").trim();
+  const q = u.indexOf("?");
+  return q >= 0 ? u.slice(0, q) : u;
+}
+
 export async function db(): Promise<ReturnType<typeof postgres>> {
-  const url = process.env.DATABASE_URL;
+  const url = process.env.DATABASE_URL ? cleanUrl(process.env.DATABASE_URL) : "";
   if (!url) throw new Error("NO_DB");
   sql ??= postgres(url, { prepare: false, max: 1, idle_timeout: 20, connect_timeout: 15 });
   const conn = sql;
