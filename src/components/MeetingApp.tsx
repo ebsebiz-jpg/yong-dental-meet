@@ -343,6 +343,7 @@ export default function MeetingApp({ logout, initial }: { logout: () => Promise<
         {!initial.dbReady && (
           <span className="mt-1 block font-medium text-red-700">
             저장소(DATABASE_URL)가 연결되지 않아 지금은 저장되지 않습니다. 새로고침하면 입력한 내용이 사라집니다.
+            {initial.dbProblem && <span className="mt-1 block">원인: {initial.dbProblem}</span>}
           </span>
         )}
       </div>

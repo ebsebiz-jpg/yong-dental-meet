@@ -11,6 +11,8 @@ import { isAuthed } from "@/lib/session";
 
 export type Loaded = {
   dbReady: boolean;
+  /** 저장소를 못 쓰는 이유(비밀 값은 포함하지 않음). 정상이면 null */
+  dbProblem: string | null;
   months: Record<string, unknown>;
   reports: Record<string, unknown>;
   rules: string | null;
@@ -19,6 +21,19 @@ export type SaveResult = { ok: boolean; error?: string };
 
 const YM = /^\d{4}-\d{2}$/;
 const MAX_BYTES = 3_000_000;
+
+/** 연결 오류를 사용자가 고칠 수 있는 말로 바꾼다. 주소나 비밀번호는 내보내지 않는다. */
+function describeDbError(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  const code = (e as { code?: string } | null)?.code ?? "";
+  console.error("[db]", code || msg.split("\n")[0].slice(0, 120));
+  if (/password authentication failed/i.test(msg)) return "비밀번호가 맞지 않습니다. 연결 주소의 데이터베이스 비밀번호를 확인해 주세요.";
+  if (/tenant or user not found/i.test(msg)) return "사용자·프로젝트 식별자가 맞지 않습니다. Supabase의 Transaction pooler 주소를 그대로 복사했는지 확인해 주세요.";
+  if (code === "ENOTFOUND" || /getaddrinfo/i.test(msg)) return "서버 주소를 찾지 못했습니다. 주소 중간(호스트 이름)이 잘렸거나 틀렸는지 확인해 주세요.";
+  if (code === "ETIMEDOUT" || code === "CONNECT_TIMEOUT" || /timeout/i.test(msg)) return "데이터베이스에 연결하는 시간이 초과됐습니다. 포트 6543의 Transaction pooler 주소인지 확인해 주세요.";
+  if (e instanceof TypeError || /invalid url|invalid connection/i.test(msg)) return "연결 주소 형식이 올바르지 않습니다. [ ] 대괄호, 따옴표, 공백이 남아 있지 않은지 확인해 주세요.";
+  return "데이터베이스에 연결하지 못했습니다. Vercel Logs의 [db] 줄을 확인해 주세요.";
+}
 
 async function put(key: string, value: unknown): Promise<SaveResult> {
   if (!(await isAuthed())) return { ok: false, error: "로그인이 필요합니다." };
@@ -38,20 +53,23 @@ async function put(key: string, value: unknown): Promise<SaveResult> {
 }
 
 export async function loadAll(): Promise<Loaded> {
-  const empty: Loaded = { dbReady: false, months: {}, reports: {}, rules: null };
-  if (!(await isAuthed()) || !hasDb()) return empty;
+  const empty: Loaded = { dbReady: false, dbProblem: null, months: {}, reports: {}, rules: null };
+  if (!(await isAuthed())) return empty;
+  if (!hasDb()) {
+    return { ...empty, dbProblem: "서버가 DATABASE_URL을 받지 못했습니다. Vercel 환경변수에 DATABASE_URL이 있는지, Production에 체크되어 있는지 확인하고 Redeploy 해 주세요." };
+  }
   try {
     const sql = await db();
     const rows = await sql<{ key: string; value: unknown }[]>`select key, value from meeting_state`;
-    const out: Loaded = { dbReady: true, months: {}, reports: {}, rules: null };
+    const out: Loaded = { dbReady: true, dbProblem: null, months: {}, reports: {}, rules: null };
     for (const r of rows) {
       if (r.key.startsWith("month:")) out.months[r.key.slice(6)] = r.value;
       else if (r.key.startsWith("report:")) out.reports[r.key.slice(7)] = r.value;
       else if (r.key === "rules" && typeof r.value === "string") out.rules = r.value;
     }
     return out;
-  } catch {
-    return empty;
+  } catch (e) {
+    return { ...empty, dbProblem: describeDbError(e) };
   }
 }
 
