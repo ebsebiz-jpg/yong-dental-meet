@@ -1,7 +1,7 @@
 "use server";
 
 import postgres from "postgres";
-import { db, hasDb } from "@/lib/db";
+import { db, hasDb, inspectDbUrl } from "@/lib/db";
 import { isAuthed } from "@/lib/session";
 
 /*
@@ -31,8 +31,8 @@ function describeDbError(e: unknown): string {
   if (/tenant or user not found/i.test(msg)) return "사용자·프로젝트 식별자가 맞지 않습니다. Supabase의 Transaction pooler 주소를 그대로 복사했는지 확인해 주세요.";
   if (code === "ENOTFOUND" || /getaddrinfo/i.test(msg)) return "서버 주소를 찾지 못했습니다. 주소 중간(호스트 이름)이 잘렸거나 틀렸는지 확인해 주세요.";
   if (code === "ETIMEDOUT" || code === "CONNECT_TIMEOUT" || /timeout/i.test(msg)) return "데이터베이스에 연결하는 시간이 초과됐습니다. 포트 6543의 Transaction pooler 주소인지 확인해 주세요.";
-  if (e instanceof TypeError || /invalid url|invalid connection/i.test(msg)) return "연결 주소 형식이 올바르지 않습니다. [ ] 대괄호, 따옴표, 공백이 남아 있지 않은지 확인해 주세요.";
-  return "데이터베이스에 연결하지 못했습니다. Vercel Logs의 [db] 줄을 확인해 주세요.";
+  if (e instanceof TypeError || /invalid url|invalid connection/i.test(msg)) return `연결 주소 형식이 올바르지 않습니다. 점검 결과: ${inspectDbUrl()}`;
+  return `데이터베이스에 연결하지 못했습니다(${(code || msg.split("\n")[0]).slice(0, 80)}). 주소 점검: ${inspectDbUrl()}`;
 }
 
 async function put(key: string, value: unknown): Promise<SaveResult> {
