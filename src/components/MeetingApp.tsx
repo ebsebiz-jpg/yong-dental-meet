@@ -2,8 +2,17 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
-import { deleteMonth, saveMonth, saveReport, saveRules, type Loaded } from "@/app/data";
+import {
+  deleteMonth,
+  purgeFromTrash,
+  restoreFromTrash,
+  saveMonth,
+  saveReport,
+  saveRules,
+  type Loaded,
+} from "@/app/data";
 import { savePptx, type SlideItem } from "@/lib/pptx";
+import { seriesSummary, summarize } from "@/lib/summary";
 import { deserializeMonth, emptyReport, normalizeReport, serializeMonth, type Report } from "@/lib/store";
 import {
   DEFAULT_RULES,
@@ -28,10 +37,21 @@ const box = "rounded-xl border border-slate-200 bg-white p-5 print:border-0 prin
 const input =
   "w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-slate-900";
 
-function DataTable({ t, comment, onComment }: { t: Table; comment: string; onComment: (v: string) => void }) {
+function DataTable({
+  t,
+  summary,
+  comment,
+  onComment,
+}: {
+  t: Table;
+  summary: string | null;
+  comment: string;
+  onComment: (v: string) => void;
+}) {
   return (
     <section className="break-inside-avoid">
       <h3 className="text-base font-semibold text-slate-900">{t.title}</h3>
+      {summary && <p className="mt-1 text-sm font-medium text-slate-800">{summary}</p>}
       {t.note && <p className="mt-1 text-xs text-slate-500">{t.note}</p>}
       <div className="mt-2 overflow-x-auto">
         <table className="w-full border-collapse text-sm">
@@ -132,7 +152,8 @@ export default function MeetingApp({ logout, initial }: { logout: () => Promise<
   const [rulesText, setRulesText] = useState(initial.rules ?? DEFAULT_RULES);
   const [pptBusy, setPptBusy] = useState(false);
   const [delBusy, setDelBusy] = useState(false);
-  const [undo, setUndo] = useState<{ ym: string; month: Month; report: Report | null } | null>(null);
+  const [undo, setUndo] = useState<{ ym: string; month?: Month; report?: Report | null } | null>(null);
+  const [trash, setTrash] = useState(initial.trash);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [savedAt, setSavedAt] = useState("");
   const dirtyReports = useRef(new Set<string>());
@@ -244,7 +265,8 @@ export default function MeetingApp({ logout, initial }: { logout: () => Promise<
     });
   };
 
-  // 삭제는 바로 실행하고, 이 화면을 닫기 전까지 [되돌리기]로 복구할 수 있다(새로고침하면 복구 불가).
+  // 삭제하면 서버의 휴지통으로 옮겨 trashDays일 동안 보관한다(새로고침해도 복구 가능).
+  // 저장소가 없는 환경에서는 이 화면을 닫기 전까지만 되돌릴 수 있다.
   const removeMonth = async (ym: string) => {
     const month = months.get(ym);
     if (!month || delBusy) return;
@@ -257,8 +279,11 @@ export default function MeetingApp({ logout, initial }: { logout: () => Promise<
           setErr(r.error ?? "삭제에 실패했습니다.");
           return;
         }
+        setTrash((p) => [{ ym, deletedAt: new Date().toISOString() }, ...p.filter((x) => x.ym !== ym)]);
+        setUndo({ ym });
+      } else {
+        setUndo({ ym, month, report: reports[ym] ?? null });
       }
-      setUndo({ ym, month, report: reports[ym] ?? null });
       setMonths((p) => new Map([...p].filter(([k]) => k !== ym)));
       setReports((p) => Object.fromEntries(Object.entries(p).filter(([k]) => k !== ym)));
       dirtyReports.current.delete(ym);
@@ -267,22 +292,45 @@ export default function MeetingApp({ logout, initial }: { logout: () => Promise<
     }
   };
 
-  const restoreMonth = async () => {
-    if (!undo || delBusy) return;
-    const { ym, month, report: rep } = undo;
+  /** 휴지통(또는 방금 지운 로컬 백업)에서 한 달을 되살린다. */
+  const restoreMonth = async (ym: string) => {
+    if (delBusy) return;
     setDelBusy(true);
     setErr("");
     try {
       if (initial.dbReady) {
-        const results = [await saveMonth(ym, serializeMonth(month)), ...(rep ? [await saveReport(ym, rep)] : [])];
-        if (!results.every((r) => r.ok)) {
-          setErr("되돌리기 저장에 실패했습니다. 잠시 뒤 다시 눌러 주세요.");
+        const r = await restoreFromTrash(ym);
+        if (!r.ok || !r.month) {
+          setErr(r.error ?? "복구에 실패했습니다.");
           return;
         }
+        setMonths((p) => new Map(p).set(ym, deserializeMonth(r.month)));
+        if (r.report) setReports((p) => ({ ...p, [ym]: normalizeReport(r.report) }));
+        setTrash((p) => p.filter((x) => x.ym !== ym));
+      } else if (undo?.ym === ym && undo.month) {
+        const { month, report: rep } = undo;
+        setMonths((p) => new Map(p).set(ym, month));
+        if (rep) setReports((p) => ({ ...p, [ym]: rep }));
       }
-      setMonths((p) => new Map(p).set(ym, month));
-      if (rep) setReports((p) => ({ ...p, [ym]: rep }));
-      setUndo(null);
+      setUndo((u) => (u?.ym === ym ? null : u));
+    } finally {
+      setDelBusy(false);
+    }
+  };
+
+  const purgeMonth = async (ym: string) => {
+    if (delBusy) return;
+    if (!window.confirm(`${ymLabel(ym)} 자료를 휴지통에서 영구 삭제할까요? 이 작업은 되돌릴 수 없습니다.`)) return;
+    setDelBusy(true);
+    setErr("");
+    try {
+      const r = await purgeFromTrash(ym);
+      if (!r.ok) {
+        setErr(r.error ?? "영구 삭제에 실패했습니다.");
+        return;
+      }
+      setTrash((p) => p.filter((x) => x.ym !== ym));
+      setUndo((u) => (u?.ym === ym ? null : u));
     } finally {
       setDelBusy(false);
     }
@@ -301,7 +349,40 @@ export default function MeetingApp({ logout, initial }: { logout: () => Promise<
       });
       const items: SlideItem[] = [];
       if (comments.actions?.trim()) items.push({ kind: "text", title: "전월 액션아이템 점검", body: comments.actions });
-      for (const t of tables) items.push({ kind: "table", table: t, comment: comments[t.id] });
+      for (const t of tables) {
+        items.push({ kind: "table", table: t, summary: summarize(t), comment: comments[t.id] });
+        if (t.id === "t38") {
+          // 월별 추이 표 바로 뒤에 추이 그래프 두 장을 넣는다(최근 6개월, 막대 0에서 시작).
+          const ks = keys.filter((k) => k <= cur).slice(-6);
+          const ms = ks.map((k) => metrics(months.get(k)));
+          const labels = ks.map(ymLabel);
+          const vals = (f: (m: ReturnType<typeof metrics>) => number | null) => ms.map((m) => f(m) ?? 0);
+          if (ks.length >= 2) {
+            const total = vals((m) => m.total);
+            const patients = vals((m) => m.patients);
+            const fresh = vals((m) => m.fresh);
+            items.push({
+              kind: "charts",
+              title: "월별 추이 ① 총 진료비·환자 1인당 진료비",
+              summary: seriesSummary("총 진료비", labels, total, "원"),
+              charts: [
+                { title: "총 진료비(백만원)", labels, values: total.map((v) => Math.round(v / 1e5) / 10), format: "#,##0.0" },
+                { title: "환자 1인당 진료비(원)", labels, values: vals((m) => m.perPatient).map(Math.round), format: "#,##0" },
+              ],
+            });
+            const last = ks.length - 1;
+            items.push({
+              kind: "charts",
+              title: "월별 추이 ② 내원 환자·신환",
+              summary: `내원 환자는 ${labels[0]} ${patients[0].toLocaleString("ko-KR")}명에서 ${labels[last]} ${patients[last].toLocaleString("ko-KR")}명으로 ${patients[last] > patients[0] ? "늘" : patients[last] < patients[0] ? "줄" : "같"}${patients[last] === patients[0] ? "습니다" : "었고"}, 신환은 ${fresh[0].toLocaleString("ko-KR")}명에서 ${fresh[last].toLocaleString("ko-KR")}명으로 ${fresh[last] > fresh[0] ? "늘었습니다" : fresh[last] < fresh[0] ? "줄었습니다" : "같습니다"}.`,
+              charts: [
+                { title: "내원 환자(명)", labels, values: patients, format: "#,##0" },
+                { title: "신환(명)", labels, values: fresh, format: "#,##0" },
+              ],
+            });
+          }
+        }
+      }
       items.push({
         kind: "table",
         table: {
@@ -406,10 +487,12 @@ export default function MeetingApp({ logout, initial }: { logout: () => Promise<
         {undo && (
           <div className="mt-3 flex flex-wrap items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
             <span>
-              {ymLabel(undo.ym)} 자료를 삭제했습니다. 새로고침하면 되돌릴 수 없으니 필요하면 지금 되돌리세요.
+              {initial.dbReady
+                ? `${ymLabel(undo.ym)} 자료를 휴지통으로 옮겼습니다. 아래 휴지통에서 ${initial.trashDays}일 안에 복구할 수 있습니다.`
+                : `${ymLabel(undo.ym)} 자료를 삭제했습니다. 저장소가 없어 새로고침하면 되돌릴 수 없으니 필요하면 지금 되돌리세요.`}
             </span>
             <button
-              onClick={restoreMonth}
+              onClick={() => restoreMonth(undo.ym)}
               disabled={delBusy}
               className="rounded bg-slate-900 px-3 py-1 text-xs font-medium text-white disabled:opacity-50"
             >
@@ -459,6 +542,44 @@ export default function MeetingApp({ logout, initial }: { logout: () => Promise<
             </table>
             <p className="mt-1 text-xs text-slate-500">빠진 리포트가 있으면 그 항목의 표는 만들어지지 않습니다.</p>
           </div>
+        )}
+        {initial.dbReady && trash.length > 0 && (
+          <details className="mt-4 rounded-lg border border-slate-200 p-3" open={!!undo}>
+            <summary className="cursor-pointer text-sm font-medium text-slate-800">
+              휴지통 ({trash.length}) — 삭제 후 {initial.trashDays}일이 지나면 자동으로 영구 삭제됩니다
+            </summary>
+            <p className="mt-2 text-xs text-slate-500">
+              지운 달의 집계 자료와 입력한 코멘트가 그대로 보관되어 있습니다. 소개자·신환 이름이 들어 있으니 필요 없으면 영구 삭제하세요.
+            </p>
+            <ul className="mt-2 divide-y divide-slate-100 text-sm">
+              {trash.map((x) => (
+                <li key={x.ym} className="flex flex-wrap items-center justify-between gap-2 py-2">
+                  <span>
+                    {ymLabel(x.ym)}
+                    <span className="ml-2 text-xs text-slate-500">
+                      삭제 {new Date(x.deletedAt).toLocaleString("ko-KR", { dateStyle: "medium", timeStyle: "short" })}
+                    </span>
+                  </span>
+                  <span className="flex gap-2">
+                    <button
+                      onClick={() => restoreMonth(x.ym)}
+                      disabled={delBusy}
+                      className="rounded bg-slate-900 px-3 py-1 text-xs font-medium text-white disabled:opacity-50"
+                    >
+                      복구
+                    </button>
+                    <button
+                      onClick={() => purgeMonth(x.ym)}
+                      disabled={delBusy}
+                      className="rounded border border-red-300 px-3 py-1 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
+                    >
+                      영구 삭제
+                    </button>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </details>
         )}
       </div>
 
@@ -574,6 +695,7 @@ export default function MeetingApp({ logout, initial }: { logout: () => Promise<
             <DataTable
               key={t.id}
               t={t}
+              summary={summarize(t)}
               comment={comments[t.id] ?? ""}
               onComment={(v) => setComments((c) => ({ ...c, [t.id]: v }))}
             />

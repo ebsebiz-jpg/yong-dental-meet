@@ -7,8 +7,11 @@ const LIGHT = "EAF0F7";
 const GRID = "C9D3DF";
 const FONT = "맑은 고딕";
 
+export type TrendChart = { title: string; labels: string[]; values: number[]; format: string };
+
 export type SlideItem =
-  | { kind: "table"; table: Table; comment?: string; commentLabel?: string }
+  | { kind: "table"; table: Table; summary?: string | null; comment?: string; commentLabel?: string }
+  | { kind: "charts"; title: string; summary?: string | null; charts: TrendChart[]; comment?: string }
   | { kind: "text"; title: string; body: string };
 
 export type PptxInput = {
@@ -89,9 +92,51 @@ export async function savePptx(input: PptxInput): Promise<void> {
       continue;
     }
 
+    if (item.kind === "charts") {
+      slide.addText(item.title, { x: 0.5, y: 0.3, w: 9.7, h: 0.7, fontFace: FONT, fontSize: 22, bold: true, color: NAVY, valign: "middle" });
+      let cy = 1.25;
+      if (item.summary) {
+        slide.addText(item.summary, { x: 0.5, y: cy, w: 12.33, h: 0.5, fontFace: FONT, fontSize: 15, bold: true, color: "222222", valign: "middle" });
+        cy += 0.6;
+      }
+      const hasC = !!item.comment?.trim();
+      const bottomC = hasC ? 6.2 : 6.95;
+      const gap = 0.3;
+      const w = (12.33 - gap * (item.charts.length - 1)) / item.charts.length;
+      item.charts.forEach((c, i) => {
+        slide.addChart(
+          pres.ChartType.bar,
+          [{ name: c.title, labels: c.labels, values: c.values }],
+          {
+            x: 0.5 + i * (w + gap), y: cy, w, h: bottomC - cy,
+            barDir: "col", chartColors: [NAVY], barGapWidthPct: 70,
+            showTitle: true, title: c.title, titleFontFace: FONT, titleFontSize: 14, titleColor: "222222",
+            showLegend: false, showValue: true, dataLabelFormatCode: c.format, dataLabelFontFace: FONT,
+            dataLabelFontSize: 12, dataLabelColor: "222222", dataLabelPosition: "outEnd",
+            catAxisLabelFontFace: FONT, catAxisLabelFontSize: 12, catAxisLabelColor: "444444",
+            valAxisHidden: true, valAxisMinVal: 0, valGridLine: { style: "none" },
+          },
+        );
+      });
+      if (hasC) {
+        slide.addText(
+          [
+            { text: "분석 코멘트  ", options: { bold: true, color: NAVY } },
+            { text: item.comment!.trim().replace(/\n/g, "  "), options: { color: "222222" } },
+          ],
+          { x: 0.5, y: 6.3, w: 12.33, h: 0.75, fontFace: FONT, fontSize: 12, fill: { color: LIGHT }, valign: "middle", margin: 8 },
+        );
+      }
+      continue;
+    }
+
     const { table: t, comment } = item;
     slide.addText(t.title, { x: 0.5, y: 0.3, w: 9.7, h: 0.7, fontFace: FONT, fontSize: 22, bold: true, color: NAVY, valign: "middle" });
     let y = 1.25;
+    if (item.summary) {
+      slide.addText(item.summary, { x: 0.5, y, w: 12.33, h: 0.5, fontFace: FONT, fontSize: 15, bold: true, color: "222222", valign: "middle" });
+      y += 0.6;
+    }
     if (t.note) {
       slide.addText(t.note, { x: 0.5, y, w: 12.33, h: 0.45, fontFace: FONT, fontSize: 10, color: "666666", valign: "top" });
       y += 0.5;
