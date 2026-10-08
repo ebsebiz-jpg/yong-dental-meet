@@ -131,6 +131,8 @@ export default function MeetingApp({ logout, initial }: { logout: () => Promise<
   const [prevSel, setPrevSel] = useState<string | null>(null);
   const [rulesText, setRulesText] = useState(initial.rules ?? DEFAULT_RULES);
   const [pptBusy, setPptBusy] = useState(false);
+  const [delBusy, setDelBusy] = useState(false);
+  const [undo, setUndo] = useState<{ ym: string; month: Month; report: Report | null } | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [savedAt, setSavedAt] = useState("");
   const dirtyReports = useRef(new Set<string>());
@@ -242,18 +244,48 @@ export default function MeetingApp({ logout, initial }: { logout: () => Promise<
     });
   };
 
+  // 삭제는 바로 실행하고, 이 화면을 닫기 전까지 [되돌리기]로 복구할 수 있다(새로고침하면 복구 불가).
   const removeMonth = async (ym: string) => {
-    if (!window.confirm(`${ymLabel(ym)}의 저장된 자료와 입력 내용을 삭제할까요? 되돌릴 수 없습니다.`)) return;
-    if (initial.dbReady) {
-      const r = await deleteMonth(ym);
-      if (!r.ok) {
-        setErr(r.error ?? "삭제에 실패했습니다.");
-        return;
+    const month = months.get(ym);
+    if (!month || delBusy) return;
+    setDelBusy(true);
+    setErr("");
+    try {
+      if (initial.dbReady) {
+        const r = await deleteMonth(ym);
+        if (!r.ok) {
+          setErr(r.error ?? "삭제에 실패했습니다.");
+          return;
+        }
       }
+      setUndo({ ym, month, report: reports[ym] ?? null });
+      setMonths((p) => new Map([...p].filter(([k]) => k !== ym)));
+      setReports((p) => Object.fromEntries(Object.entries(p).filter(([k]) => k !== ym)));
+      dirtyReports.current.delete(ym);
+    } finally {
+      setDelBusy(false);
     }
-    setMonths((p) => new Map([...p].filter(([k]) => k !== ym)));
-    setReports((p) => Object.fromEntries(Object.entries(p).filter(([k]) => k !== ym)));
-    dirtyReports.current.delete(ym);
+  };
+
+  const restoreMonth = async () => {
+    if (!undo || delBusy) return;
+    const { ym, month, report: rep } = undo;
+    setDelBusy(true);
+    setErr("");
+    try {
+      if (initial.dbReady) {
+        const results = [await saveMonth(ym, serializeMonth(month)), ...(rep ? [await saveReport(ym, rep)] : [])];
+        if (!results.every((r) => r.ok)) {
+          setErr("되돌리기 저장에 실패했습니다. 잠시 뒤 다시 눌러 주세요.");
+          return;
+        }
+      }
+      setMonths((p) => new Map(p).set(ym, month));
+      if (rep) setReports((p) => ({ ...p, [ym]: rep }));
+      setUndo(null);
+    } finally {
+      setDelBusy(false);
+    }
   };
 
   const exportPptx = async () => {
@@ -371,6 +403,23 @@ export default function MeetingApp({ logout, initial }: { logout: () => Promise<
         {unknown.length > 0 && (
           <p className="mt-2 text-xs text-red-600">인식하지 못한 파일: {unknown.join(", ")}</p>
         )}
+        {undo && (
+          <div className="mt-3 flex flex-wrap items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+            <span>
+              {ymLabel(undo.ym)} 자료를 삭제했습니다. 새로고침하면 되돌릴 수 없으니 필요하면 지금 되돌리세요.
+            </span>
+            <button
+              onClick={restoreMonth}
+              disabled={delBusy}
+              className="rounded bg-slate-900 px-3 py-1 text-xs font-medium text-white disabled:opacity-50"
+            >
+              되돌리기
+            </button>
+            <button onClick={() => setUndo(null)} className="text-xs text-amber-800 underline">
+              닫기
+            </button>
+          </div>
+        )}
         {keys.length > 0 && (
           <div className="mt-4 overflow-x-auto">
             <table className="w-full border-collapse text-sm">
@@ -395,7 +444,12 @@ export default function MeetingApp({ logout, initial }: { logout: () => Promise<
                       </td>
                     ))}
                     <td className="border border-slate-200 px-2 py-1.5 text-center">
-                      <button onClick={() => removeMonth(k)} className="text-xs text-red-600 underline">
+                      <button
+                        onClick={() => removeMonth(k)}
+                        disabled={delBusy}
+                        title={`${ymLabel(k)} 자료와 입력 내용을 삭제합니다. 삭제 직후에는 되돌릴 수 있습니다.`}
+                        className="rounded border border-red-300 px-2 py-0.5 text-xs font-medium text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
                         삭제
                       </button>
                     </td>
